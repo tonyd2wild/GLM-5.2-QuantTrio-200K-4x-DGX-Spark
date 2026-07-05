@@ -1,0 +1,28 @@
+GLM-5.2-QuantTrio-200K-4x-DGX-Spark
+Copyright (c) 2026 tonyd2wild
+
+Licensed under the Apache License, Version 2.0.
+
+This repository includes and derives from work by others:
+
+1. launch.sh is derived from launch.sh in the glm-5.2-gb10 repository,
+   Copyright (c) CosmicRaisins (https://github.com/CosmicRaisins/glm-5.2-gb10),
+   licensed under the Apache License, Version 2.0. CosmicRaisins also authored
+   the sm_121 sparse-MLA port and the 10 Triton kernels this recipe depends on
+   (not vendored here; obtain them from the upstream repository).
+
+2. mods/glm52-sm12x-sparse/run.sh and mods/glm52-b12x-sparse/run.sh were
+   shared by NVIDIA forum user ciprianveg (forum thread 374125, post #34,
+   "glm52-sparse.zip") and replicate CosmicRaisins' Apache-2.0 mods. Included
+   verbatim, with an attribution header added.
+
+3. The serve configuration incorporates tuning contributed on the NVIDIA
+   developer forums by Zatz (unpruned QuantTrio recipe, thread 374125 posts
+   #57/#84), back199640 (posts #80/#89), and ciprianveg (post #107):
+   https://forums.developer.nvidia.com/t/glm-5-2-on-a-4x-gb10-cluster-22-tok-s-decode-256k-ctx-recipe/374125
+
+4. The container image build uses eugr's spark-vllm-docker harness
+   (https://github.com/eugr/spark-vllm-docker).
+
+5. The model checkpoint is QuantTrio/GLM-5.2-Int4-Int8Mix
+   (https://huggingface.co/QuantTrio), not distributed in this repository.
