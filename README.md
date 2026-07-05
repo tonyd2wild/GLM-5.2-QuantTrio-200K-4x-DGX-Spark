@@ -26,6 +26,12 @@ exist only because of `patches/fix-indexer-mtp-overhang.py` — unpatched vLLM c
 concurrent. Context-depth tables (16K/32K prefill/decode) are the one remaining PENDING
 item — see [Benchmarks](#8-benchmarks).)*
 
+> **⚠️ Benchmark caveat (temp 0):** GLM-5.2 is a reasoning model. Independent testing on
+> Apple Silicon (MLX) found that `temperature=0` can trigger TP-collective deadlocks on this
+> architecture — the engine hangs rather than errors. This was not observed in the vLLM/GB10
+> runs above (which completed cleanly), but if you replicate at higher concurrency or deeper
+> context and hit a silent hang, try `temperature=0.6+`. See Gotcha 8 below.
+
 ---
 
 ## 1. Credits & lineage
@@ -44,6 +50,7 @@ what you are using.
 | **p33zy** | Explored the alternative NVFP4 quantization path and GB10 hardware-acceleration trade-offs (thread 374125). |
 | **aidendle94** | Shared container/image resources (originally for DeepSeek on GB10) that partially carried over to the GLM-5.2 bring-up (thread 374125). |
 | **Claude Code** | Technical clarifications on the thread: sm_121 capability detection, cudagraph capture safety, b12x install requirements, and the sparse-MLA indexer path (thread 374125). |
+| **[indexer-bf16](https://github.com/chadhurley25075-web/GLM-5.2-indexer-BF16-MLX)** | Independent finding: indexer precision governs long-context coherence in DSA models. Mixed-precision recipe (BF16 indexer/attn/embed/router + 4-bit experts) with proof across three quants. Operational findings: temp=0 TP deadlocks, thinking-mode token budgets, cudagraph KV starvation on unified memory. See Gotchas 8–10 and the Context depth warning. |
 
 **Contributions from this deployment** (things we found during bring-up, offered back):
 
@@ -319,6 +326,23 @@ It prints `patched: .../indexer.py` on success and is idempotent (safe to re-run
    KV — 200000 ctx needs 10.19 GiB. Use gmu `0.91` with `--kv-cache-memory-bytes 10950000000`;
    boot allocates a 200,064-token pool.
 
+8. **temperature=0 can deadlock TP collectives on reasoning models.** GLM-5.2 reasons heavily
+into `reasoning_content`. At `temperature=0`, the deterministic sampling path can trigger a
+TP-collective deadlock — the engine hangs silently rather than erroring. This was observed
+independently on MLX/tensor-parallel (not vLLM), but the architecture is the same. If you hit
+silent hangs at higher concurrency or deeper context, use `temperature >= 0.6`. The benchmarks
+above ran at temp 0 without issue, but this is a known landmine at scale.
+9. **`enable_thinking:false` gives sub-second response vs 40s+ with think-trace.** For inference
+and tool-use turns where you don't need the reasoning trace, disable thinking explicitly.
+The model otherwise spends its entire token budget in `reasoning_content` and returns near-empty
+`content` — which looks broken but isn't. On small `max_tokens` budgets (80–600), reasoning eats
+the whole allocation.
+10. **cudagraph + low utilization starves KV cache on unified memory.** On architectures where
+CPU and GPU share memory (GB10, Apple Silicon), piecewise cudagraph can reserve enough to push
+KV below the minimum threshold. If you see OOM during graph capture that doesn't match your
+memory math, try eager mode + MTP speculative decoding instead — it can be both more
+memory-efficient AND faster.
+
 ## 8. Benchmarks
 
 **Final concurrency results (2026-07-05)** — measured on this cluster with the final serve
@@ -348,6 +372,24 @@ Notes:
 ### Context depth (16K / 32K)
 
 **PENDING** — the one remaining open item: prefill/decode tables at 16K and 32K context depth.
+
+> **⚠️ Indexer precision warning:** When running these tests, watch output quality closely,
+> not just tok/s. Independent mixed-precision quantization experiments (MLX-side) found that
+> the DSA lightning indexer is the component most sensitive to quantization — it governs
+> which KV positions each token attends to, and degrading it corrupts long-range attention
+> routing. In testing across three checkpoint variants:
+>
+> | Quant variant | Indexer precision | Observed collapse point |
+> |---|---|---|
+> | 8-bit uniform | 8-bit | ~4,700 tokens → degraded output |
+> | DQ4plus (8-bit indexer) | 8-bit | ~3,000–3,700 tokens → degraded output |
+> | BF16 indexer + 4-bit experts | **BF16** | 5,846+ tokens clean — natural stop |
+>
+> The routed MoE experts compress aggressively with no quality loss; the indexer, MLA
+> attention, embeddings, router gate, and lm_head do not. If your 16K/32K benchmarks show
+> coherent degradation (repeated words, salad, loss of topic) before any crash, indexer
+> precision is the likely variable. Recipe and proof:
+> https://github.com/chadhurley25075-web/GLM-5.2-indexer-BF16-MLX
 
 ### Boot telemetry (verified)
 
