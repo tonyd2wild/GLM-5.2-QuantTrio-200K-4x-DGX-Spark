@@ -6,15 +6,18 @@ nodes over a RoCE fabric, with **200,000-token context**, **MTP speculative deco
 fp8 sparse-MLA KV cache, and full CUDA graphs. vLLM native multi-node (no Ray), one plain
 `docker run` per node. Target: **~23–25+ tok/s decode, ~700+ tok/s prefill** single-stream.
 
-### Expected performance
+### Measured performance (interim)
 
-| Metric | Depth 0 | Depth 16K | Depth 32K |
-|---|---|---|---|
-| Decode (tok/s, single-stream) | PENDING | PENDING | PENDING |
-| Prefill (tok/s) | PENDING | PENDING | PENDING |
+| Metric | Measured | Status |
+|---|---|---|
+| Decode, single-stream (c1) | 22–30 tok/s observed; best 30.3 tok/s | **verified** (multi-run median PENDING) |
+| Decode, 2 concurrent | 36.1–36.7 tok/s aggregate (~18–19 tok/s/stream) | **verified** (consistent across two boots) |
+| MTP acceptance (k=4) | 3.25–3.74 mean accepted length | **verified** |
+| c3–c6 + context-depth (16K/32K) | — | PENDING (runs in progress) |
 
-*(Measured numbers to be filled in after benchmarking — see [Benchmarks](#8-benchmarks). Target
-based on forum-reported results for this config class: ~23–25+ tok/s decode, ~700+ tok/s prefill.)*
+*(Interim numbers, ~zero-depth context, 512-token generations at temp 0 — see
+[Benchmarks](#8-benchmarks) for detail. Target based on forum-reported results for this config
+class: ~23–25+ tok/s decode, ~700+ tok/s prefill.)*
 
 ---
 
@@ -31,6 +34,17 @@ what you are using.
 | **ciprianveg** | The baked-mod scripts in `mods/` (`glm52-sparse.zip`, thread 374125 post #34) that replicate CosmicRaisins' mods, and the NCCL channel-narrowing find (`NCCL_MIN/MAX_NCHANNELS=4`, post #107). |
 | **[eugr / spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)** | The image build harness (`build-and-copy.sh`) used to build the vLLM container for GB10. |
 | **[QuantTrio](https://huggingface.co/QuantTrio)** | The `GLM-5.2-Int4-Int8Mix` checkpoint itself. |
+
+**Contributions from this deployment** (things we found during bring-up, offered back):
+
+- The **indexer MTP-overhang fix** ([`patches/fix-indexer-mtp-overhang.py`](patches/fix-indexer-mtp-overhang.py)):
+  the DSA indexer under-sizes its expanded block-table buffer by one block when
+  `max_model_len` is an exact multiple of the block size and MTP is enabled — crashes the
+  engine at ≥3 concurrent requests.
+- The **load-phase page-cache-drop procedure** (Gotcha 6): periodic `drop_caches` on every
+  node during weight load, which unsticks GB10 kernel-reclaim stalls.
+- The **memory-budget numbers** for exactly 200K context on this checkpoint (Gotcha 7 and the
+  config table): gmu 0.91 + `--kv-cache-memory-bytes 10950000000`.
 
 Forum threads (read both — they are the primary sources):
 
@@ -65,6 +79,7 @@ Forum threads (read both — they are the primary sources):
 | `launch.sh` | The 4-node launcher (adapted from CosmicRaisins, Apache-2.0). Edit the `EDIT`-marked config block, run from the head node. |
 | `mods/glm52-sm12x-sparse/run.sh` | Baked-in-image mod: installs Triton sparse-MLA kernels + DeepGEMM bypass (verbatim from ciprianveg's zip). |
 | `mods/glm52-b12x-sparse/run.sh` | Baked-in-image mod: installs b12x for CUDA-graph-safe sparse-MLA decode (verbatim from ciprianveg's zip). |
+| `patches/fix-indexer-mtp-overhang.py` | Baked-in-image patch: fixes the DSA indexer's expanded block-table buffer being one block too small under MTP (required for `--max-num-seqs >= 3`). See step (h). |
 | `LICENSE`, `NOTICE` | Apache-2.0 + attribution. |
 
 **Not vendored: the 10 Triton kernels.** Get them from the upstream repo,
@@ -86,8 +101,9 @@ sparse_mla_kernels.py
 
 ## 5. Step-by-step
 
-Steps (a)–(b) run on one build machine (any of the Sparks works). Steps (c)–(f) touch **every
-node**. Step (g) runs from the head node only.
+Steps (a)–(b) and (h) run on one build machine (any of the Sparks works). Steps (c)–(f) touch
+**every node**. Step (g) runs from the head node only. Do step (h) — the indexer patch — as
+part of the same bake as (b), before you distribute the image in (c).
 
 ### a. Build the vLLM image (~35–60 min)
 
@@ -120,9 +136,23 @@ docker run -d --name glm52-modding \
 docker exec glm52-modding bash /mods/glm52-sm12x-sparse/run.sh
 docker exec glm52-modding bash /mods/glm52-b12x-sparse/run.sh
 
-docker commit glm52-modding vllm-node-tf5-glm52-b12x:probe-modded
+docker commit \
+  --change 'ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]' \
+  --change 'CMD []' \
+  glm52-modding vllm-node-tf5-glm52-b12x:probe-modded
 docker rm -f glm52-modding
 ```
+
+> **WARNING — two docker traps that both bit us:**
+>
+> 1. `docker commit` inherits `--entrypoint` overrides from the patch container. If the
+>    container you're committing was started with an entrypoint override (or with a bare
+>    command like `sleep infinity`), the committed image carries it forward and will not
+>    boot vLLM. **Always** commit with
+>    `--change 'ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]' --change 'CMD []'`
+>    (as shown above).
+> 2. When piping stdin scripts into containers, use `docker exec -i`. Without `-i` the
+>    script **silently no-ops** — no error, nothing runs, and you commit an unpatched image.
 
 Both scripts print `✓` lines; the sm12x one must end with `=== glm52-sm12x-sparse complete ===`
 and the b12x one must show a successful `import b12x`.
@@ -199,6 +229,36 @@ Plain `docker run` per node; vLLM native multi-node (`--nnodes/--node-rank`), **
 Workers start headless first, head last. Expect **~12 min weight load + ~10 min cudagraph
 warmup** before `curl http://<head>:8210/v1/models` answers.
 
+### h. Bake the indexer MTP-overhang patch (required for `--max-num-seqs >= 3`)
+
+Do this during the same bake session as step (b), before committing and distributing the
+image. `patches/fix-indexer-mtp-overhang.py` fixes a vLLM bug where the DSA indexer sizes
+its expanded block-table buffer from `max_model_len` alone; MTP spec tokens can extend a
+request one block past it, and at ≥3 concurrent requests the engine crashes with
+`RuntimeError: The expanded size of the tensor (3125) must match the existing size (3126)`.
+See the patch's docstring for the full story.
+
+Bake it exactly the same way as the mods — mount it into the patch container and run it
+before the `docker commit`:
+
+```bash
+docker run -d --name glm52-modding \
+  ... \
+  -v $(pwd)/patches:/patches:ro \
+  vllm-node-tf5-glm52-b12x:probe sleep infinity
+
+# (after the two mod scripts from step b)
+docker exec glm52-modding python3 /patches/fix-indexer-mtp-overhang.py
+
+docker commit \
+  --change 'ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]' \
+  --change 'CMD []' \
+  glm52-modding vllm-node-tf5-glm52-b12x:probe-modded
+docker rm -f glm52-modding
+```
+
+It prints `patched: .../indexer.py` on success and is idempotent (safe to re-run).
+
 ## 6. Key serve config, with rationale
 
 | Setting | Value | Why |
@@ -209,9 +269,9 @@ warmup** before `curl http://<head>:8210/v1/models` answers.
 | `--compilation-config` | `{"cudagraph_mode":"FULL"}` | Full CUDA graphs for decode. Requires the b12x mod — without it, graph capture crashes (`torch.full` under capture). |
 | `--async-scheduling` | on | Overlaps CPU scheduling with GPU execution (back199640, #80) — meaningful tok/s on GB10. |
 | `--max-num-batched-tokens` | `8192` | Prefill chunk size: big enough for ~700+ tok/s prefill, small enough not to blow memory at depth. |
-| `--gpu-memory-utilization` + `--kv-cache-memory-bytes` | `0.90` + `10500000000` | **Deterministic boot.** gmu alone lets vLLM size KV off *currently free* memory, which on GB10 unified memory varies with page cache — same command OOMs or boots depending on cache state. Pinning KV to 10.5 GB makes every boot identical. |
+| `--gpu-memory-utilization` + `--kv-cache-memory-bytes` | `0.91` + `10950000000` | **Deterministic boot + KV budget for exactly 200K.** gmu alone lets vLLM size KV off *currently free* memory, which on GB10 unified memory varies with page cache — same command OOMs or boots depending on cache state. And gmu 0.90 leaves only 9.78 GiB for KV where 200000 ctx needs 10.19 GiB (see Gotcha 7). gmu 0.91 with KV pinned to 10.95 GB boots a 200,064-token pool every time. |
 | `--max-model-len` | `200000` | 200K context, fits in the pinned KV budget with fp8_ds_mla. |
-| `--max-num-seqs` | `1` | Single-stream latency build; raise for concurrency at some decode cost. |
+| `--max-num-seqs` | `6` | Up to 6 concurrent streams. Requires the indexer MTP-overhang patch (step h) — unpatched, the engine crashes at ≥3 concurrent requests. Drop to 1 for a pure single-stream latency build. |
 | `NCCL_MIN/MAX_NCHANNELS` | `4` | ciprianveg (#107): narrowing NCCL channels on GB10 RoCE cuts contention; more channels is slower here. |
 | `--reasoning-parser` / `--tool-call-parser` | `glm45` / `glm47` | Correct parsers for GLM-5.2's reasoning traces and tool-call format. |
 | `--distributed-executor-backend` | `mp` | Native multiprocessing + `--nnodes/--node-rank` rendezvous. No Ray. |
@@ -236,27 +296,44 @@ warmup** before `curl http://<head>:8210/v1/models` answers.
 5. **Don't trust `--gpu-memory-utilization` alone.** See the config table: pin
    `--kv-cache-memory-bytes` explicitly, or identical launches will OOM ~sometimes~ depending on
    what the page cache looked like at profiling time.
+6. **Page-cache thrash during weight load.** On GB10, big loads stall at 100% CPU in kernel
+   reclaim even with 14–18 GB "free". Run an unconditional
+   `sync; echo 3 > /proc/sys/vm/drop_caches` every 60s on **every** node during the load phase
+   (and once right before launch). Symptom: shard progress freezes mid-load; a manual drop
+   unsticks it within seconds.
+7. **KV budget for exactly 200K.** `--gpu-memory-utilization 0.90` leaves only 9.78 GiB for
+   KV — 200000 ctx needs 10.19 GiB. Use gmu `0.91` with `--kv-cache-memory-bytes 10950000000`;
+   boot allocates a 200,064-token pool.
 
 ## 8. Benchmarks
 
-**PENDING** — to be filled after benching (llama-benchy-style, depths 0 / 16K / 32K).
+**Interim results** — measured on this cluster with the final serve config (gmu 0.91, KV
+10.95 GB, max-num-seqs 6, MTP k=4). All runs: 512-token generations, temperature 0,
+~zero-depth context. Marked **verified** where measured, **PENDING** where runs are still
+in progress.
 
-### Single-stream
+### Decode (verified, interim)
 
-| Depth | Prefill tok/s | Decode tok/s | TTFT (s) |
+| Concurrency | Aggregate decode tok/s | Per-stream | Status |
 |---|---|---|---|
-| 0 | PENDING | PENDING | PENDING |
-| 16K | PENDING | PENDING | PENDING |
-| 32K | PENDING | PENDING | PENDING |
+| 1 | 22–30 observed across runs; best 30.3 (MTP accept 3.74) | same | **verified** — multi-run median PENDING |
+| 2 | 36.1–36.7 (consistent across two boots) | ~18–19 | **verified** |
+| 3–6 | — | — | PENDING (runs in progress) |
 
-### Concurrent
+### Context depth (16K / 32K)
 
-| Concurrency | Depth | Aggregate prefill tok/s | Aggregate decode tok/s |
-|---|---|---|---|
-| 2 | 0 | PENDING | PENDING |
-| 2 | 16K | PENDING | PENDING |
-| 4 | 0 | PENDING | PENDING |
-| 4 | 16K | PENDING | PENDING |
+PENDING — depth sweeps in progress.
+
+### MTP acceptance (verified)
+
+Mean accepted length **3.25–3.74** (k=4) across runs.
+
+### Boot telemetry (verified)
+
+- Weights: **98.07 GiB per node**.
+- KV pool: **200,064 tokens**, `fp8_ds_mla`.
+- Steady state: MemAvailable 0.6–0.9 GB + 3.6–4.5 GB swap parked (**by design** — matches
+  the upstream author's memory profile for this config class).
 
 ## 9. License
 
