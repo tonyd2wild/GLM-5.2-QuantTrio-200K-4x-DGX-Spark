@@ -147,6 +147,9 @@ BASE=(
 )
 
 # The serving command, with {port} resolved.
+# NOTE: --max-num-seqs 6 requires the indexer MTP-overhang patch baked into the
+# image (patches/fix-indexer-mtp-overhang.py, README step h) — unpatched vLLM
+# crashes at >= 3 concurrent requests with MTP enabled.
 SERVE=(
   vllm serve /cache/huggingface/hub/glm52-int4-int8mix
   --served-model-name glm-5.2 --host 0.0.0.0 --port "$PORT"
@@ -155,8 +158,8 @@ SERVE=(
   --async-scheduling
   --speculative-config '{"method":"mtp","num_speculative_tokens":4,"draft_tensor_parallel_size":1,"attention_backend":"FLASHMLA_SPARSE"}'
   --tensor-parallel-size 4 --pipeline-parallel-size 1
-  --max-model-len 200000 --max-num-seqs 1 --max-num-batched-tokens 8192
-  --gpu-memory-utilization 0.90 --kv-cache-memory-bytes 10500000000
+  --max-model-len 200000 --max-num-seqs 6 --max-num-batched-tokens 8192
+  --gpu-memory-utilization 0.91 --kv-cache-memory-bytes 10950000000
   --kv-cache-dtype fp8_ds_mla
   --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL"}'
 )
