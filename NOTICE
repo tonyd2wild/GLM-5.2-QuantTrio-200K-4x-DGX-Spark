@@ -26,3 +26,11 @@ This repository includes and derives from work by others:
 
 5. The model checkpoint is QuantTrio/GLM-5.2-Int4-Int8Mix
    (https://huggingface.co/QuantTrio), not distributed in this repository.
+
+6. Additional discussion, testing, and clarifications that informed this recipe
+   came from NVIDIA developer forum thread 374125 participants p33zy (alternative
+   NVFP4 quantization path and hardware-acceleration trade-offs), aidendle94
+   (container/image resources shared for GB10 that partially carried over), and
+   Claude Code (sm_121 capability detection, cudagraph capture safety, b12x
+   install requirements, and sparse-MLA indexer path):
+   https://forums.developer.nvidia.com/t/glm-5-2-on-a-4x-gb10-cluster-22-tok-s-decode-256k-ctx-recipe/374125

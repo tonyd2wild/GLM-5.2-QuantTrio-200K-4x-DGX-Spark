@@ -41,6 +41,9 @@ what you are using.
 | **ciprianveg** | The baked-mod scripts in `mods/` (`glm52-sparse.zip`, thread 374125 post #34) that replicate CosmicRaisins' mods, and the NCCL channel-narrowing find (`NCCL_MIN/MAX_NCHANNELS=4`, post #107). |
 | **[eugr / spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)** | The image build harness (`build-and-copy.sh`) used to build the vLLM container for GB10. |
 | **[QuantTrio](https://huggingface.co/QuantTrio)** | The `GLM-5.2-Int4-Int8Mix` checkpoint itself. |
+| **p33zy** | Explored the alternative NVFP4 quantization path and GB10 hardware-acceleration trade-offs (thread 374125). |
+| **aidendle94** | Shared container/image resources (originally for DeepSeek on GB10) that partially carried over to the GLM-5.2 bring-up (thread 374125). |
+| **Claude Code** | Technical clarifications on the thread: sm_121 capability detection, cudagraph capture safety, b12x install requirements, and the sparse-MLA indexer path (thread 374125). |
 
 **Contributions from this deployment** (things we found during bring-up, offered back):
 
