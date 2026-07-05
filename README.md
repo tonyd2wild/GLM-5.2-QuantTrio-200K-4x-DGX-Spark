@@ -4,20 +4,27 @@ A complete, follower-replicable recipe for serving **GLM-5.2** — the **unprune
 `GLM-5.2-Int4-Int8Mix` checkpoint, all 256 experts intact — across **4× NVIDIA DGX Spark (GB10)**
 nodes over a RoCE fabric, with **200,000-token context**, **MTP speculative decoding (k=4)**,
 fp8 sparse-MLA KV cache, and full CUDA graphs. vLLM native multi-node (no Ray), one plain
-`docker run` per node. Target: **~23–25+ tok/s decode, ~700+ tok/s prefill** single-stream.
+`docker run` per node.
 
-### Measured performance (interim)
+**Measured: 28.8 tok/s single-stream (median), 60.5 tok/s aggregate at 6 concurrent, 200K
+context, unpruned.**
 
-| Metric | Measured | Status |
-|---|---|---|
-| Decode, single-stream (c1) | 22–30 tok/s observed; best 30.3 tok/s | **verified** (multi-run median PENDING) |
-| Decode, 2 concurrent | 36.1–36.7 tok/s aggregate (~18–19 tok/s/stream) | **verified** (consistent across two boots) |
-| MTP acceptance (k=4) | 3.25–3.74 mean accepted length | **verified** |
-| c3–c6 + context-depth (16K/32K) | — | PENDING (runs in progress) |
+### Measured performance (final, 2026-07-05)
 
-*(Interim numbers, ~zero-depth context, 512-token generations at temp 0 — see
-[Benchmarks](#8-benchmarks) for detail. Target based on forum-reported results for this config
-class: ~23–25+ tok/s decode, ~700+ tok/s prefill.)*
+| Concurrency | Aggregate tok/s | Per-stream avg | Per-stream min | MTP accept len |
+|---|---|---|---|---|
+| 1 (warm, median of 3) | **28.8** | 28.8 | 27.3 | 3.3–3.6 |
+| 2 | 37.6 | 20.2 | 18.8 | 3.50 |
+| 3 | 39.3 | 13.6 | 13.1 | 3.22 |
+| 4 | 53.5 | 14.1 | 13.4 | 3.28 |
+| 5 | 59.1 | 12.5 | 11.8 | 3.22 |
+| 6 | **60.5** | 10.6 | 10.1 | 3.23 |
+
+*(512-token generations, temp 0, low-depth context. c1 is the warm median of 3 runs —
+27.3/29.0/28.8; the cold first request after boot reads lower (16–22 tok/s). The c3+ rows
+exist only because of `patches/fix-indexer-mtp-overhang.py` — unpatched vLLM crashes at 3
+concurrent. Context-depth tables (16K/32K prefill/decode) are the one remaining PENDING
+item — see [Benchmarks](#8-benchmarks).)*
 
 ---
 
@@ -238,6 +245,10 @@ request one block past it, and at ≥3 concurrent requests the engine crashes wi
 `RuntimeError: The expanded size of the tensor (3125) must match the existing size (3126)`.
 See the patch's docstring for the full story.
 
+**VALIDATED (2026-07-05):** with the patch verified in-image, the full concurrency sweep
+(c1–c6) completed with zero crashes — including the c3+ levels that reliably crashed an
+unpatched engine. See [Benchmarks](#8-benchmarks).
+
 Bake it exactly the same way as the mods — mount it into the patch container and run it
 before the `docker commit`:
 
@@ -307,26 +318,33 @@ It prints `patched: .../indexer.py` on success and is idempotent (safe to re-run
 
 ## 8. Benchmarks
 
-**Interim results** — measured on this cluster with the final serve config (gmu 0.91, KV
-10.95 GB, max-num-seqs 6, MTP k=4). All runs: 512-token generations, temperature 0,
-~zero-depth context. Marked **verified** where measured, **PENDING** where runs are still
-in progress.
+**Final concurrency results (2026-07-05)** — measured on this cluster with the final serve
+config (gmu 0.91, KV 10.95 GB, max-num-seqs 6, MTP k=4), on a boot with the indexer patch
+verified in-image. All runs: 512-token generations, temperature 0, low-depth context. All 6
+concurrency levels completed with **zero crashes**.
 
-### Decode (verified, interim)
+### Decode by concurrency (final)
 
-| Concurrency | Aggregate decode tok/s | Per-stream | Status |
-|---|---|---|---|
-| 1 | 22–30 observed across runs; best 30.3 (MTP accept 3.74) | same | **verified** — multi-run median PENDING |
-| 2 | 36.1–36.7 (consistent across two boots) | ~18–19 | **verified** |
-| 3–6 | — | — | PENDING (runs in progress) |
+| Concurrency | Aggregate tok/s | Per-stream avg | Per-stream min | MTP accept len |
+|---|---|---|---|---|
+| 1 (warm, median of 3) | 28.8 | 28.8 | 27.3 | 3.3–3.6 |
+| 2 | 37.6 | 20.2 | 18.8 | 3.50 |
+| 3 | 39.3 | 13.6 | 13.1 | 3.22 |
+| 4 | 53.5 | 14.1 | 13.4 | 3.28 |
+| 5 | 59.1 | 12.5 | 11.8 | 3.22 |
+| 6 | 60.5 | 10.6 | 10.1 | 3.23 |
+
+Notes:
+
+- **c1 is the warm median of 3 runs (27.3 / 29.0 / 28.8).** The cold first request after
+  boot reads lower (16–22 tok/s) — quote the warm median, with this caveat.
+- **The c3–c6 rows exist only because of the indexer patch** (`patches/fix-indexer-mtp-overhang.py`,
+  step h): without it, the engine crashes at 3 concurrent requests. This run validates the
+  patch — 6/6 concurrency levels, zero crashes.
 
 ### Context depth (16K / 32K)
 
-PENDING — depth sweeps in progress.
-
-### MTP acceptance (verified)
-
-Mean accepted length **3.25–3.74** (k=4) across runs.
+**PENDING** — the one remaining open item: prefill/decode tables at 16K and 32K context depth.
 
 ### Boot telemetry (verified)
 
