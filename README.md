@@ -123,8 +123,28 @@ pinned vLLM commit:
 ```bash
 git clone https://github.com/eugr/spark-vllm-docker
 cd spark-vllm-docker
+# PIN THE HARNESS. Later harness commits carry inline vLLM patches that do not
+# apply to our pinned ref (the build fails at an llm_base_proposer.py hunk),
+# and harness HEAD moves fast.
+git checkout 4ed3ebf
+
+# DISABLE THE HARNESS'S PRESET-PR AUTO-MERGE. By default ("auto"), when no
+# --apply-vllm-pr is given, the Dockerfile merges a preset list of vLLM PRs
+# fetched LIVE from GitHub. Those branches have moved since this recipe was
+# written: merging them today fast-forwards the pinned ab666069 to current
+# vLLM main. The build still "succeeds" -- and the engine then dies at
+# KV-cache init (view 576 vs 656 B/token) with the b12x backend missing.
+# (build-and-copy.sh's own APPLY_PRESET_VLLM_PRS=false default is NOT
+# forwarded to docker build, so this sed is required.)
+sed -i 's|^ARG VLLM_APPLY_PRESET_PRS=""|ARG VLLM_APPLY_PRESET_PRS="false"|' Dockerfile
+
 ./build-and-copy.sh --vllm-ref ab666069935c1f23e8ef56038b4659ac9e8f19f8 \
   -t vllm-node-tf5-glm52-b12x:probe --tf5
+
+# VERIFY THE PIN HELD. The wheel version must be a dev build AT the pin:
+#   grep -oE "vllm==[0-9a-z.+]*" build.log | tail -1   ->  ...dev190+gab6660699...
+# If it reads dev893+g52b6667xx (or any other suffix), the tree was silently
+# un-pinned and the resulting image will NOT boot this recipe.
 ```
 
 ### b. Bake the mods into the image
@@ -273,7 +293,42 @@ docker rm -f glm52-modding
 
 It prints `patched: .../indexer.py` on success and is idempotent (safe to re-run).
 
+## 5b. Upgrading beyond the pin (read before bumping ANY ref)
+
+The pin is load-bearing. The 10 Triton kernels are bind-mounted over exact
+`dist-packages/vllm/...` paths, the mod scripts patch specific files, and the serve
+flags were validated against the internals of `ab666069` -- e.g. this recipe needs no
+`index_topk_pattern` override *because* the pin includes vLLM #45895 (see the note in
+section 6). On a different ref those assumptions shift: on 2026-07 main the b12x
+backend does not register at all and the fp8_ds_mla KV layout changed (656 vs
+576 B/token view) -- the engine dies at KV-cache init.
+
+Treat any ref bump as a **revalidation event**, not a rebuild:
+
+1. Bump the harness and the vLLM ref **together** (newer harness exists to build
+   newer vLLM; mixing directions is where the silent breakage lives). Keep
+   `VLLM_APPLY_PRESET_PRS="false"` -- pinned builds should never merge live PRs.
+2. **Gate on the wheel suffix**: the built wheel version must be a dev build at the
+   ref you asked for. If the suffix is any other hash, stop -- the tree moved.
+3. Smoke-test before trusting: boots on all nodes; boot log selects the expected
+   sparse attention backend; `GPU KV cache size` matches expectation; temp-0
+   correctness on a known prompt; c1 within ~10% of the numbers in this README.
+4. Expect the kernels/mods to need re-porting on larger jumps -- diff the overlay
+   target paths inside the new image first.
+
+Long-term exit: native GLM-DSA sparse support on sm_121 in upstream vLLM
+(vllm-project/vllm#45317 is the tracker). When that lands, the kernel overlay -- and
+with it most of this pinning -- becomes unnecessary.
+
 ## 6. Key serve config, with rationale
+
+> **Why no `index_topk_pattern` hf-override here?** Other GLM-5.2-on-GB10 recipes
+> (including the 655K DCP4 companion recipe) pass
+> `--hf-overrides '{"index_topk_pattern":"..."}'` -- mandatory on their pins, or
+> output silently corrupts past ~2k tokens. This recipe does NOT need it because
+> the pinned ref `ab666069` IS the merge commit of vLLM #45895 ("Indexer init
+> skip and MTP TopK share"), which obsoletes the manual override. Corollary: do
+> not mix this launch.sh with a different vLLM pin without re-checking that.
 
 | Setting | Value | Why |
 |---|---|---|

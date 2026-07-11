@@ -104,6 +104,12 @@ ENVV=(
   -e "TORCH_CUDA_ARCH_LIST=12.1a"
   -e "NCCL_NET=IB"
   -e "NCCL_IB_DISABLE=0"
+  # NOTE non-uniform clusters: if a node's fabric identity is NOT the same port
+  # on every host (e.g. head on rocep1s0f1/enp1s0f1np1, workers on
+  # rocep1s0f0/enp1s0f0np0), lift these three -e lines out of ENVV and inject
+  # them per rank in docker_run_cmd() from arrays indexed by node-rank, e.g.:
+  #   HCAS=(rocep1s0f1 rocep1s0f0 rocep1s0f0 rocep1s0f0)
+  #   IFACES=(enp1s0f1np1 enp1s0f0np0 enp1s0f0np0 enp1s0f0np0)
   -e "NCCL_IB_HCA=rocep1s0f0"          # EDIT: your RoCE HCA (`ibdev2netdev`)
   -e "NCCL_SOCKET_IFNAME=enp1s0f0np0"  # EDIT: your fabric interface (`ip link`)
   -e "GLOO_SOCKET_IFNAME=enp1s0f0np0"  # EDIT: same fabric interface
