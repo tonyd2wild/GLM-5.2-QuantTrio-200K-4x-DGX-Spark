@@ -70,3 +70,26 @@ Baseline going in (same-day bench, warm): c1 31.1 code / 34.2 math; c6 aggregate
 - **VLLM_MARLIN_USE_ATOMIC_ADD=1: kept** (log-recommended; not isolated, rode along with both winners).
 - **GDR finding:** NCCL reports `GPU Direct RDMA Disabled` on all HCAs — `dlvsym(mlx5dv_reg_dmabuf_mr, MLX5_1.25)` fails against Ubuntu rdma-core 50.0 (host and container identical). All cross-node traffic host-stages. On unified-memory GB10 the copy is same-silicon so the penalty is muted; revisit only if chasing the last few tok/s (needs a rdma-core rebuild or NCCL that probes unversioned symbols).
 - **Felt latency:** see README — `chat_template_kwargs: {"enable_thinking": false}` takes first visible token from 7-10s to 0.36s. Biggest perceived-speed lever on the whole stack.
+- **NCCL_ALGO=Tree: DEAD — boot fails with `DistBackendError: NCCL error ... invalid usage` (NCCL 2.30.4) at graph capture.** Do not retry on this stack.
+- **Dual-rail RoCE: untested tonight** (deliberately skipped after the Tree failure — second rail is verified UP on all 4 nodes; a future candidate, expected 0-2 c1).
+
+## Final serving config (end of night)
+
+`speednight-k5.sh` = KNOWNGOOD + `cudagraph_capture_sizes [6,12,18,24,30,36]` + MTP `k=5` +
+`VLLM_MARLIN_USE_ATOMIC_ADD=1` (chunks 8192, NCCL WARN). **c1 mean 32.5 (records on all three
+workloads), c6 aggregate 65-71 vs ~60.5 baseline.**
+
+## Ranked: what to do next
+
+1. **DFlash single-pass drafter lane** — the ceiling math says ~48ms of every ~110ms step is the
+   k sequential drafter passes (piecewise-only by code). DFlash collapses them to one pass:
+   **est. +10-20 c1, the 34→50 path.** Days of work; a `speednight-dflash.sh` lane already exists.
+2. **FlashInfer 0.6.14 sparse-MLA port** — jasl's vLLM #41834 posted 41.9 tok/s decode / 1757 tok/s
+   prefill on 2× GB10 (DSA-family model) with it. Could replace the slower parts of the b12x
+   Triton overlay AND is the only known prefill-rate lever (~800 → potentially 1500+ tok/s).
+3. **Remaining cherry-picks onto the pin**: vLLM #47448 (MTP post-final-norm fix — may lift
+   acceptance further, compounding with k=5), #47410 (FP32 gate). #46862 already deployed.
+4. **Dual-rail RoCE test** (cheap, one relaunch, do it next quiet window).
+5. **RDMA one-shot allreduce** — still build-worthy (+5-10) but weeks; do after 1-2.
+6. Re-pin to v0.25.1 only when #45317 (native sm_121 DSA) merges or the DFlash/dspark plumbing
+   is needed; revalidation protocol is in "Upgrading beyond the pin".
