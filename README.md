@@ -1,18 +1,20 @@
-# GLM-5.2 (unpruned QuantTrio Int4-Int8Mix) on 4× DGX Spark — 28.8 tok/s single-stream, 200K context
+# GLM-5.2 (unpruned QuantTrio Int4-Int8Mix) on 4× DGX Spark — 36 tok/s peak single-stream, 200K context
 
 > The unpruned QuantTrio `GLM-5.2-Int4-Int8Mix` checkpoint — all 256 experts intact — served
 > across **4× NVIDIA DGX Spark (GB10)** over a RoCE fabric at **200,000-token context**, with
-> MTP speculative decoding (k=4), fp8 sparse-MLA KV cache, and full CUDA graphs. vLLM native
-> multi-node (no Ray), one plain `docker run` per node.
+> MTP speculative decoding (k=5), fp8 sparse-MLA KV cache, and full CUDA graphs. vLLM native
+> multi-node (no Ray), one plain `docker run` per node. Speed-Night 2 (2026-07-17): **32.5 tok/s
+> mean / 36.0 peak single-stream, 65-75 tok/s aggregate at 6 concurrent.**
 
 ## TL;DR
 
 - **What you get:** full-quality GLM-5.2 — the unpruned QuantTrio `GLM-5.2-Int4-Int8Mix`
   checkpoint with **all 256 experts intact** (no REAP/expert pruning), served across 4× GB10 at
-  200K context with MTP k=4 speculative decode, `fp8_ds_mla` KV, full CUDA graphs, and vLLM
+  200K context with MTP k=5 speculative decode, `fp8_ds_mla` KV, full CUDA graphs, and vLLM
   native multi-node (no Ray).
-- **The numbers:** **28.8 tok/s single-stream** (warm median), **60.5 tok/s aggregate at 6
-  concurrent**, 200,000-token context, unpruned.
+- **The numbers (2026-07-17 config):** **32.5 tok/s single-stream mean, 36.0 peak** (warm, solo),
+  **65-75 tok/s aggregate at 6 concurrent**, 200,000-token context, unpruned. First visible token
+  **0.36 s** with `enable_thinking:false`.
 - **In-checkpoint drafter:** the MTP drafter lives in the checkpoint (layer 78) — no separate
   drafter model to download, align, or version-match; `--speculative-config` just points at the
   checkpoint itself.
