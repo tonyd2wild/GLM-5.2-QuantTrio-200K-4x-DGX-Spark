@@ -286,9 +286,25 @@ Notes:
   (`patches/fix-indexer-mtp-overhang.py`, step h): without it, the engine crashes at 3 concurrent
   requests. This run validates the patch — 6/6 concurrency levels, zero crashes.
 
-### Context depth (16K / 32K)
+### Context depth (2K–32K) — measured 2026-07-17
 
-**PENDING** — the one remaining open item: prefill/decode tables at 16K and 32K context depth.
+Planted-fact recall + coherence probe (fact buried mid-document, temp 0, task = recall the
+fact + summarize the document). Run against the live cluster; prompted after warm-up.
+
+| Depth (prompt tokens) | Fact recall | Output coherence | Wall time (incl. prefill) |
+|---|---|---|---|
+| 2,057 | PASS | clean | 18 s |
+| 4,071 | PASS | clean | 10 s |
+| 8,065 | PASS | clean | 15 s |
+| 16,248 | PASS | clean | 25 s |
+| 32,653 | PASS | clean | 45 s |
+
+No degradation, repetition, or "token salad" through 32K depth on this stack. Context: issue #1
+reported (on an MLX/Apple-Silicon pipeline) that sub-BF16 indexer precision collapses long-context
+coherence at ~3–5K depth. That failure mode does **not** reproduce on this vLLM/GB10 recipe through
+32K — plausibly because the pinned ref's indexer path (vLLM #45895 + the b12x sparse mods) handles
+the DSA indexer differently than the MLX quantization pipeline. Their warning remains worth
+knowing if you re-quantize this checkpoint on another stack: keep the indexer at BF16.
 
 ### Boot telemetry (verified)
 
