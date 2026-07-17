@@ -93,3 +93,10 @@ workloads), c6 aggregate 65-71 vs ~60.5 baseline.**
 5. **RDMA one-shot allreduce** — still build-worthy (+5-10) but weeks; do after 1-2.
 6. Re-pin to v0.25.1 only when #45317 (native sm_121 DSA) merges or the DFlash/dspark plumbing
    is needed; revalidation protocol is in "Upgrading beyond the pin".
+
+**Post-script:** the end-of-night re-verify of the final k=5 boot read c1 ~22 — because six live
+user streams were on the endpoint during the bench (num_requests_running=6; the box was serving
+~52 tok/s aggregate to real traffic at that moment). Solo numbers for this exact config stand from
+the identical quiet-box boot the same morning (c1 32.5 mean / c6 65-75). Benchmark discipline rule
+worth keeping: `curl /metrics | grep num_requests_running` must read 0, or your c1 number is
+actually a cN number.
