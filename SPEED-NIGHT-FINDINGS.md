@@ -147,3 +147,66 @@ The prefill/decode lever (jasl's vLLM #41834: 41.9 decode / 1757 prefill on 2× 
 4. **RDMA one-shot allreduce** — +5–10 tok/s, weeks.
 
 Dead/confirmed-not-worth on this stack: adaptive-k, dual-rail, local-argmax, EP (fleet-killer), fuse_gemm_comms (symm-mem single-box-only), NCCL Tree (boot-fails), partial-prefills (pin-unsupported).
+
+## Phase B addendum — DFlash at OUR production config (200k + fp8_ds_mla): OOMs.
+
+Re-ran DFlash with our full config (200k, fp8_ds_mla target KV, gmu 0.91, KV 10.95 GiB, capture
+sizes [13,26,39,52,65,78]) — not Keys' 128k. **Result: crashes at KV-cache init:**
+```
+ValueError: max seq len 200000 needs 13.86 GiB KV, only 10.2 GiB available.
+Estimated max model length = 147,136.
+```
+The DFlash draft (7 GiB weights + dense-attention overhead) consumes the memory that KV needs, so
+**200k is physically impossible with DFlash on this hardware — hard ceiling ~147k.** This is the
+quantitative proof of "DFlash costs context" (Keys locked his at 128k for exactly this). Combined
+with the 128k result (14% accept, slower than k5), DFlash is **doubly disqualified: it loses ~53k
+of context AND runs slower** with a mismatched draft. A DFlash lane on our target would need (a) a
+self-distilled draft matched to our weights AND (b) accepting ≤147k context — and even then it's a
+count-only fast lane, not a k5 replacement.
+
+## Phase C completed — FlashInfer 0.6.14 is ALREADY in the image; b12x owns attention.
+
+- **Our serving image already ships `flashinfer-python==0.6.14`** (probed a throwaway container:
+  "Requirement already satisfied ... 0.6.14", `flashinfer.mla` imports). The premise "bump
+  0.6.13→0.6.14" is moot — we're already on the version jasl's #41834 credits.
+- **But attention runs on our b12x `FLASHMLA_SPARSE` backend, not FlashInfer's sparse-MLA path.**
+  Boot log: `Using FLASHMLA_SPARSE attention backend out of potential backends` (FlashInfer listed
+  as *available*, not selected). So the 41.9/1757 numbers jasl got from FlashInfer's path are NOT
+  automatically ours — realizing them means *switching the attention backend* to FlashInfer's
+  sparse-MLA and revalidating against b12x, a real A/B, not a version bump.
+- **k5 prefill baseline (measured this session):** ~596 tok/s @ 1.8k depth, ~1084 @ 7k, ~889 @ 32k.
+  (Higher than the ~800 estimate; peaks mid-depth.)
+
+### Revised Phase C verdict
+The prefill lever is cheaper than thought (no rebuild — we have 0.6.14) but still not one-night:
+it's a **backend-swap A/B** (FLASHMLA_SPARSE vs FlashInfer sparse-MLA) with real coherence/perf
+revalidation risk on the serving path. Worth a dedicated session; documented, not swapped tonight
+(guardrail: end serving ≥ KNOWNGOOD).
+
+---
+
+# Speed-Night 3 — FINAL
+
+**Serving: k5 KNOWNGOOD** — MTP k=5, 200,064-token pool, `FLASHMLA_SPARSE`, coherent. **36 peak /
+32.5 mean c1, 65–75 c6.** Unchanged, because **nothing beat it** — and that is now proven across
+every lever, not assumed:
+
+| Lever | Outcome |
+|---|---|
+| adaptive-k | regression (c1 ~22) |
+| dual-rail RoCE | no-op (rail-2 link-local, NCCL ignored it) |
+| local-argmax | slight regression (c1 28.9) |
+| TTFT partial-prefill | pin-unsupported |
+| cherry-pick #47448 | already in fork |
+| cherry-pick #47410 | already effective (config fp32 router) |
+| DFlash 128k (Keys' draft) | boots, 14% accept → slower everywhere |
+| DFlash 200k | OOMs (max ctx ~147k) |
+| FlashInfer 0.6.14 | already installed; b12x owns attention (backend-swap = future A/B) |
+
+**Ranked remaining upside (all multi-day):**
+1. **FlashInfer sparse-MLA backend swap** — cheapest real lever now that 0.6.14 is confirmed present; a backend A/B, not a rebuild. Prefill + decode candidate.
+2. **Self-distilled DFlash draft vs our target** — the only path to a 40+ count fast-lane; needs training + ≤147k ctx; second endpoint, not a replacement.
+3. **Re-pin to v0.25.1** — upstream GLM fixes; heavy revalidation.
+4. **RDMA one-shot allreduce** — +5–10, weeks.
+
+The honest headline: **k5 at 36 peak is the proven ceiling for one-night work on this stack.** Speed-Night 3 converted "untested ideas" into a measured map — every cheap lever is exhausted, and each big bet now has an exact, quantified requirement.
