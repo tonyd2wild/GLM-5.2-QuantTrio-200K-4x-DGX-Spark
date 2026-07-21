@@ -146,6 +146,33 @@ KMOUNTS=(
   -v "$KERNELS_DIR/deepseek_v2.py:$MODELS/deepseek_v2.py:ro"
 )
 
+# ----------------------------------------------------------------------------
+# Kernel preflight — FAIL CLOSED (issue #5). deepseek_v2.py imports
+# fused_indexer_q_rope_quant from sparse_attn_indexer.py; if the indexer overlay
+# is missing or version-skewed and doesn't export it, EVERY rank dies at model
+# registration with a cryptic ImportError before any API comes up. Catch it here
+# on the head instead of discovering it four containers deep. The known-good
+# MATCHED set is vendored in this repo under kernels/ (rsync it to $KERNELS_DIR
+# on every node — README step f). NOTE: this validates the HEAD's $KERNELS_DIR
+# only; make sure the SAME set is present on all nodes.
+KERNEL_FILES=(
+  sparse_mla_kernels.py sparse_mla_env.py sm12x_sparse_mla_attn.py
+  patch_flashmla_ops.py flashmla_sparse.py sm12x_deep_gemm_fallbacks.py
+  sm12x_mqa.py b12x_sparse_helpers.py sparse_attn_indexer.py deepseek_v2.py
+)
+for f in "${KERNEL_FILES[@]}"; do
+  [ -f "$KERNELS_DIR/$f" ] || die "kernel overlay missing: $KERNELS_DIR/$f
+   → rsync this repo's kernels/ to \$KERNELS_DIR on EVERY node (README step f, issue #5)"
+done
+if grep -q "fused_indexer_q_rope_quant" "$KERNELS_DIR/deepseek_v2.py" 2>/dev/null \
+   && ! grep -Eq "def[[:space:]]+fused_indexer_q_rope_quant" "$KERNELS_DIR/sparse_attn_indexer.py" 2>/dev/null; then
+  die "kernel mismatch (issue #5): $KERNELS_DIR/deepseek_v2.py imports
+   fused_indexer_q_rope_quant but $KERNELS_DIR/sparse_attn_indexer.py does not define it.
+   Your kernel overlays are version-skewed. Replace \$KERNELS_DIR with this repo's
+   vendored kernels/ (a matched set) on every node — do NOT mix in a fresh upstream pull."
+fi
+say "kernel preflight OK ($KERNELS_DIR): 10 overlays present, indexer↔deepseek_v2 symbol matched"
+
 # docker run base — IB passthrough is REQUIRED (without --device=/dev/infiniband
 # + IPC_LOCK + memlock, NCCL silently drops to TCP: ~12 vs 30+ tok/s).
 #

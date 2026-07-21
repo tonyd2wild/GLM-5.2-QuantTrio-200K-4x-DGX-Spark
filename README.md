@@ -451,6 +451,9 @@ with it most of this pinning -- becomes unnecessary.
    check: `grep -c fused_indexer_q_rope_quant ~/glm-triton/sparse_attn_indexer.py` should be ≥ 1 on
    every node. The `⚠ ... skipping fused_indexer patch` line from the b12x mod is a **red herring** —
    that optional patch does not provide this symbol (see `mods/glm52-b12x-sparse/run.sh`).
+   `launch.sh` now runs a **fail-closed preflight** on the head: it aborts with a clear message if
+   any of the 10 overlays are missing or if `deepseek_v2.py` imports the symbol while
+   `sparse_attn_indexer.py` doesn't define it — so this never gets discovered four containers deep.
 9. **Long-context request kills the engine and it stays down (issue #6).** At long context a request
    can trip `RuntimeError: Triton Error [CUDA]: operation not permitted` in the sm12x MQA-logits JIT
    path, which cascades to `EngineDeadError`; the head process then exits and, without a restart
