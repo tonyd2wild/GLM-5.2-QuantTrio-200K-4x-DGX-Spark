@@ -73,7 +73,14 @@ print('  ✓ fused_indexer.py patched for GLM')
 "
     fi
 else
-    echo "  ⚠ b12x not importable or fused_indexer.py missing — skipping fused_indexer patch"
+    # NOTE (issue #5): this is EXPECTED and HARMLESS on b12x==0.23.0, which ships
+    # no fused_indexer.py. This optional patch only adds a GLM ReLU-score-mode
+    # helper; it is NOT what provides fused_indexer_q_rope_quant. That symbol
+    # comes from the vendored kernels/sparse_attn_indexer.py overlay (bind-mounted
+    # by launch.sh), NOT from b12x. If you hit a fused_indexer_q_rope_quant
+    # ImportError, this skip is a red herring — check that kernels/ is the matched
+    # vendored set on every node (see README step f), not your b12x install.
+    echo "  ⓘ b12x 0.23.0 has no fused_indexer.py — skipping OPTIONAL GLM score-mode helper (expected; harmless — see issue #5)"
 fi
 
 echo "=== glm52-b12x-sparse complete ==="

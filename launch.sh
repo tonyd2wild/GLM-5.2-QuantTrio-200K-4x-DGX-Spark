@@ -53,9 +53,13 @@ MASTER_PORT=29501                        # vLLM cross-node rendezvous port
 # shared mount pointed here. This script does not assume any of them.
 WEIGHTS_DIR="/var/tmp/models"
 
-# Per-node directory holding the 10 Triton sparse-MLA kernel .py files from
-# CosmicRaisins/glm-5.2-gb10 kernels/. Bound file-by-file over the vLLM tree,
-# read-only.
+# Per-node directory holding the 10 Triton sparse-MLA kernel .py files. Bound
+# file-by-file over the vLLM tree, read-only. A KNOWN-GOOD, MATCHED set of these
+# 10 files is now VENDORED in this repo under kernels/ (see README step f) — put
+# them here on every node with:  rsync -a kernels/ <user>@$node:~/glm-triton/
+# Do NOT mix these with a fresh upstream checkout: sparse_attn_indexer.py and
+# deepseek_v2.py are a matched pair (the indexer must export
+# fused_indexer_q_rope_quant, which deepseek_v2.py imports). See issue #5.
 KERNELS_DIR="$HOME/glm-triton"
 # ============================================================================
 
@@ -144,7 +148,17 @@ KMOUNTS=(
 
 # docker run base — IB passthrough is REQUIRED (without --device=/dev/infiniband
 # + IPC_LOCK + memlock, NCCL silently drops to TCP: ~12 vs 30+ tok/s).
+#
+# --restart unless-stopped (on EVERY node): if the engine dies mid-serve — e.g.
+# the long-context Triton fault in issue #6, where the head process exits 0 and
+# would otherwise stay dead forever — Docker relaunches the container. Because
+# every node carries the policy, all four re-rendezvous fresh instead of leaving
+# a half-dead cluster. Recovery is a full reload (~15-20 min over the fabric),
+# so this is a self-heal safety net, not a substitute for root-causing #6. To
+# take the cluster down deliberately, use `--stop` — it `docker rm -f`s the
+# container on every node, and a removed container is not restarted.
 BASE=(
+  --restart unless-stopped
   --cap-add IPC_LOCK --ulimit memlock=-1:-1
   --network host --ipc host --shm-size 10gb --gpus all
   --device /dev/infiniband:/dev/infiniband

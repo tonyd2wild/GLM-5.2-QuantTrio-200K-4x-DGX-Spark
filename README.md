@@ -92,10 +92,16 @@ sed -i 's|^ARG VLLM_APPLY_PRESET_PRS=""|ARG VLLM_APPLY_PRESET_PRS="false"|' Dock
 # un-pinned and the resulting image will NOT boot this recipe.
 ```
 
-**b. Bake the mods into the image.** Get the 10 kernel files from
-[CosmicRaisins/glm-5.2-gb10](https://github.com/CosmicRaisins/glm-5.2-gb10) `kernels/` into
-`~/glm-triton` on the build machine, then run both mod scripts inside a container and commit the
-result. The two mods do:
+**b. Bake the mods into the image.** The 10 kernel files are **vendored in this repo** under
+[`kernels/`](kernels/) — a known-good, matched set (see step f and issue #5 for why we vendor them
+rather than pulling live from upstream). Put them on the build machine and run both mod scripts
+inside a container, then commit the result:
+
+```bash
+rsync -a kernels/ ~/glm-triton/     # from your clone of THIS repo
+```
+
+The two mods do:
 
 - `mods/glm52-sm12x-sparse/run.sh` — installs the Triton sparse-MLA kernels + DeepGEMM bypass
   (verbatim from ciprianveg's zip).
@@ -123,8 +129,9 @@ docker commit \
 docker rm -f glm52-modding
 ```
 
-The 10 kernel files you need from CosmicRaisins/glm-5.2-gb10 `kernels/` (Apache-2.0; not vendored
-here):
+The 10 kernel files (originally from CosmicRaisins/glm-5.2-gb10 `kernels/`, Apache-2.0) are
+**vendored in this repo** under [`kernels/`](kernels/) as a known-good, matched set — see
+[`kernels/NOTICE`](kernels/NOTICE) for attribution:
 
 ```
 b12x_sparse_helpers.py
@@ -138,6 +145,12 @@ sparse_attn_indexer.py
 sparse_mla_env.py
 sparse_mla_kernels.py
 ```
+
+> **Why vendored (issue #5):** `deepseek_v2.py` imports `fused_indexer_q_rope_quant` from
+> `sparse_attn_indexer.py`. Upstream drifted so that a fresh checkout can pair a `deepseek_v2.py`
+> that imports the symbol with a `sparse_attn_indexer.py` that no longer exports it →
+> `ImportError`/`cannot import name` at load. The copies here are the exact matched pair that serves
+> in production. **Use these — do not overwrite them with a fresh upstream pull.**
 
 > **WARNING — two docker traps that both bit us:**
 >
@@ -232,13 +245,13 @@ cp nvidia/nccl/lib/libnccl.so.2 /var/tmp/models/hub/nccl-2.30.4/
 
 ### f. Kernels on every node
 
-Copy the 10 `.py` files from CosmicRaisins/glm-5.2-gb10 `kernels/` to `~/glm-triton` on **every**
-node (launch.sh bind-mounts them file-by-file over the vLLM tree, read-only):
+Copy the 10 vendored `.py` files from **this repo's** [`kernels/`](kernels/) to `~/glm-triton`
+(`$KERNELS_DIR`) on **every** node — launch.sh bind-mounts them file-by-file over the vLLM tree,
+read-only. Using the vendored set guarantees the matched pair from issue #5 on all nodes:
 
 ```bash
-git clone https://github.com/CosmicRaisins/glm-5.2-gb10
 for node in 192.168.192.1 192.168.192.2 192.168.192.3 192.168.192.4; do
-  rsync -a glm-5.2-gb10/kernels/ <user>@$node:~/glm-triton/
+  rsync -a kernels/ <user>@$node:~/glm-triton/     # from your clone of THIS repo
 done
 ```
 
@@ -429,6 +442,24 @@ with it most of this pinning -- becomes unnecessary.
 7. **KV budget for exactly 200K.** `--gpu-memory-utilization 0.90` leaves only 9.78 GiB for KV —
    200000 ctx needs 10.19 GiB. Use gmu `0.91` with `--kv-cache-memory-bytes 10950000000`; boot
    allocates a 200,064-token pool.
+8. **`ImportError: cannot import name 'fused_indexer_q_rope_quant'` at model load (issue #5).**
+   `deepseek_v2.py` imports that symbol from `sparse_attn_indexer.py`. If you pulled the kernels
+   fresh from upstream, the two files can be version-skewed (a `deepseek_v2.py` that imports the
+   symbol paired with a `sparse_attn_indexer.py` that no longer exports it). **Fix:** use the matched
+   pair **vendored in this repo** under [`kernels/`](kernels/) and rsync *those* to `~/glm-triton`
+   on every node (README step f) — don't overwrite them with a fresh upstream checkout. Sanity
+   check: `grep -c fused_indexer_q_rope_quant ~/glm-triton/sparse_attn_indexer.py` should be ≥ 1 on
+   every node. The `⚠ ... skipping fused_indexer patch` line from the b12x mod is a **red herring** —
+   that optional patch does not provide this symbol (see `mods/glm52-b12x-sparse/run.sh`).
+9. **Long-context request kills the engine and it stays down (issue #6).** At long context a request
+   can trip `RuntimeError: Triton Error [CUDA]: operation not permitted` in the sm12x MQA-logits JIT
+   path, which cascades to `EngineDeadError`; the head process then exits and, without a restart
+   policy, the endpoint stays dead. **Mitigation (shipped):** `launch.sh` now runs every container
+   with `--restart unless-stopped`, so the cluster self-heals (a full ~15–20 min reload). This is a
+   safety net, **not a root-cause fix** — the underlying Triton fault is still under investigation.
+   If you can reproduce it, please attach the **full traceback** (the frames around
+   `fp8_mqa_logits` / `sm12x_mqa.py`) and the request length to issue #6. Until then, keeping
+   individual prompts well under the 200K ceiling avoids the trigger we've observed.
 
 ## Credits & links
 
@@ -457,6 +488,12 @@ what you are using.
   every node during weight load, which unsticks GB10 kernel-reclaim stalls.
 - The **memory-budget numbers** for exactly 200K context on this checkpoint (Troubleshooting #7 and
   the [Configuration](#configuration) table): gmu 0.91 + `--kv-cache-memory-bytes 10950000000`.
+- **Vendored, matched kernel set** ([`kernels/`](kernels/), issue #5): pinning the exact
+  `sparse_attn_indexer.py` / `deepseek_v2.py` pair that serves in production, so followers stop
+  hitting `fused_indexer_q_rope_quant` ImportErrors from upstream drift (CosmicRaisins' Apache-2.0
+  kernels, redistributed with attribution — see [`kernels/NOTICE`](kernels/NOTICE)).
+- **Engine self-heal** (issue #6): `--restart unless-stopped` on every node so a long-context
+  Triton fault that kills the engine no longer leaves the endpoint dead until a human notices.
 
 Forum threads (read both — they are the primary sources):
 
