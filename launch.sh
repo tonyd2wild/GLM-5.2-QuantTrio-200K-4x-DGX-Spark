@@ -211,6 +211,25 @@ SERVE=(
   --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL"}'
 )
 
+# Optional: decode-aware prefill scheduling (see mods/decode-aware-scheduler).
+# Fixes the prefill-induced decode stall: a long prefill freezing active decode
+# streams (head-of-line blocking). OFF by default (zero change to the above).
+# REQUIRES the mod baked into the image (bash mods/decode-aware-scheduler/run.sh);
+# without it these flags are rejected. Enable + tune via env:
+#   DECODE_AWARE=1 [DPTB=256] [LPT=2048] [IPTB=8192] ./launch.sh
+# DPTB (decode-prefill-token-budget) is the dial: lower = smoother decode under
+# load / higher prefill TTFT; higher = the reverse. See mods/ README for numbers.
+if [ "${DECODE_AWARE:-0}" = 1 ]; then
+  SERVE+=(
+    --enable-chunked-prefill
+    --enable-decode-aware-prefill
+    --long-prefill-token-threshold "${LPT:-2048}"
+    --decode-prefill-token-budget "${DPTB:-256}"
+    --idle-prefill-token-budget "${IPTB:-8192}"
+  )
+  say "decode-aware prefill ENABLED (budget ${DPTB:-256}, threshold ${LPT:-2048}, idle ${IPTB:-8192})"
+fi
+
 # Build the full `docker run` for a given rank, as a single shell-quoted string.
 docker_run_cmd() {
   local rank="$1" headless="$2"
